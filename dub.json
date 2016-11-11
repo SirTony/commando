@@ -1,0 +1,13 @@
+{
+	"name": "commando",
+	"description": "A more robust command line argument parser.",
+	"authors": [
+		"Tony J. Hudgins"
+	],
+	"copyright": "Copyright © 2016, Tony J. Hudgins",
+	"homepage": "https://github.com/SirTony/commando",
+	"license": "MIT",
+	"targetName": "commando",
+    "targetPath": "bin",
+    "sourcePath": "src"
+}
