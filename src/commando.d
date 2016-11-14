@@ -4,6 +4,7 @@ import std.uni;
 import std.conv;
 import std.path;
 import std.range;
+import std.regex;
 import std.stdio;
 import std.string;
 import std.traits;
@@ -19,7 +20,7 @@ final class ArgumentParserException : Exception
     mixin basicExceptionCtors;
 }
 
-enum hasSignature( alias fun, TRet, TArgs... )
+private enum hasSignature( alias fun, TRet, TArgs... )
     =
         isCallable!fun
     &&  is( ReturnType!( fun ) == TRet )
@@ -102,9 +103,20 @@ private final class Option
 
         return this;
     }
+
+    Option opAssign( bool value )
+    {
+        if( _handled )
+            return this;
+
+        this.assigner( Variant( value ) );
+        _handled = true;
+
+        return this;
+    }
 }
 
-alias CommandCallback = void delegate();
+private alias CommandCallback = void delegate();
 private final class Command
 {
     string command;
@@ -137,7 +149,7 @@ alias AllowBundling      = Flag!"AllowBundling";
 alias IgnoreUnrecognized = Flag!"IgnoreUnrecognized";
 alias CaseSensitive      = Flag!"CaseSensitive";
 
-struct ArgumentParserConfig
+private struct ArgumentParserConfig
 {
     AllowBundling allowBundling;
     IgnoreUnrecognized ignoreUnrecognizedOptions;
@@ -151,7 +163,7 @@ final class ArgumentSyntax
 
     ArgumentParserConfig config;
 
-    this()
+    private this()
     {
         config = ArgumentParserConfig(
             AllowBundling.yes,
@@ -372,7 +384,12 @@ final class ArgumentParser
             exit( int.min );
         }
 
-        string getNext( TypeInfo type, string flag )
+        enum longRegex    = ctRegex!( "^--(?P<flag>.*?)(?:[=:](?P<value>.+))?$", "" );
+        enum shortRegex   = ctRegex!( "^-(?P<flag>.)(?:[=:](?P<value>.+))?$", "" );
+        enum bundledRegex = ctRegex!( "^-(?P<flags>.{2,})$", "" );
+
+        string getNext( T )( TypeInfo type, T flag )
+            if( isSomeChar!T || isSomeString!T )
         {
             if( r.empty )
             {
@@ -397,80 +414,62 @@ final class ArgumentParser
             }
         }
 
+        Option findOrElse( T )( T flag )
+            if( isSomeChar!T || isSomeString!T )
+        {
+            Option result;
+            if( !syntax.tryFind( flag, result ) )
+            {
+                if( syntax.config.ignoreUnrecognizedOptions == IgnoreUnrecognized.yes )
+                    return null;
+                else
+                    throw new ArgumentParserException( "Unrecognized option '%s%s'".format( isSomeChar!T ? "-" : "--", flag ) );
+            }
+
+            return result;
+        }
+
         while( !r.empty )
         {
             auto current = r.front; r.popFront;
 
+            // Double dash by itself signals that we should stop parsing
             if( current == "--" )
                 break;
 
-            if( current.indexOf( "--" ) == 0 )
+            if( auto match = current.matchFirst( longRegex ) )
             {
-                auto flag = current[2 .. $];
-                Option option;
-                if( !syntax.tryFind( flag, option ) )
-                {
-                    if( syntax.config.ignoreUnrecognizedOptions == IgnoreUnrecognized.yes )
-                        continue;
-                    else
-                        throw new ArgumentParserException( "Unrecognized option '%s'".format( current ) );
-                }
+                auto flag = match["flag"];
+                auto option = findOrElse( flag );
 
-                option = getNext( option.type, current );
-            }
-            else if( current[0] == '-' )
-            {
-                Option option;
-                auto flag = current[1 .. $];
-                if( flag.length > 1 )
-                {
-                    if( flag[1] == ':' )
-                    {
-                        if( !syntax.tryFind( flag[0], option ) )
-                        {
-                            if( syntax.config.ignoreUnrecognizedOptions == IgnoreUnrecognized.yes )
-                                continue;
-                            else
-                                throw new ArgumentParserException( "Unrecognized option '-%s'".format( flag[0] ) );
-                        }
-
-                        option = flag[2 .. $];
-                        continue;
-                    }
-
-                    if( syntax.config.allowBundling == AllowBundling.no )
-                        throw new ArgumentParserException( "Bundling is not enabled" );
-
-                    foreach( c; flag )
-                    {
-                        if( !syntax.tryFind( c, option ) )
-                        {
-                            if( syntax.config.ignoreUnrecognizedOptions == IgnoreUnrecognized.yes )
-                                continue;
-                            else
-                                throw new ArgumentParserException( "Unrecognized option '-%s'".format( c ) );
-                        }
-                        else
-                        {
-                            if( option.type != typeid( bool ) )
-                                throw new ArgumentParserException( "Option '-%s' cannot accept a value when using bundling".format( c ) );
-
-                            option = "true";
-                        }
-                    }
-
+                if( option is null )
                     continue;
-                }
 
-                if( !syntax.tryFind( flag[0], option ) )
+                auto hasValue = match["value"] !is null && match["value"].length > 0;
+                option = hasValue ? match["value"] : getNext( option.type, flag );
+            }
+            else if( auto match = current.matchFirst( shortRegex ) )
+            {
+                auto flag = match["flag"][0];
+                auto option = findOrElse( flag );
+
+                if( option is null )
+                    continue;
+
+                auto hasValue = match["value"] !is null && match["value"].length > 0;
+                option = hasValue ? match["value"] : getNext( option.type, flag );
+            }
+            else if( auto match = current.matchFirst( bundledRegex ) )
+            {
+                foreach( flag; match["flags"] )
                 {
-                    if( syntax.config.ignoreUnrecognizedOptions == IgnoreUnrecognized.yes )
-                        continue;
-                    else
-                        throw new ArgumentParserException( "Unrecognized option '-%s'".format( flag[0] ) );
-                }
+                    auto option = findOrElse( flag );
 
-                option = getNext( option.type, current );
+                    if( option is null )
+                        continue;
+
+                    option = true;
+                }
             }
         }
 
@@ -486,7 +485,7 @@ final class ArgumentParser
             if( opt.hasShortName )
                 stderr.writefln( "Missing required option -%s/--%s", opt.shortName, opt.longName );
             else
-                stderr.writefln( "Missing required option " );
+                stderr.writefln( "Missing required option --%s", opt.longName );
         }
 
         if( quit )
@@ -542,7 +541,7 @@ unittest
             {
                 syntax.option( "firstName", &person.firstName, Required.yes, "The employee's first name" );
                 syntax.option( "lastName", &person.lastName, Required.yes, "The employee's last name" );
-                syntax.option( "age", &person.age, Required.yes, "The employee's age" );
+                syntax.option( 'a', "age", &person.age, Required.yes, "The employee's age" );
             } );
         } );
 
@@ -574,7 +573,7 @@ unittest
         "new",
         "--firstName", "John",
         "--lastName", "Doe",
-        "--age", "35"
+        "-a", "35"
     ];
 
     parse( args1 );
