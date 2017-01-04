@@ -494,7 +494,7 @@ final class ArgumentParser
 }
 
 private TVal defaultParser( TVal )( string value )
-    if( isNumeric!TVal )
+    if( std.traits.isNumeric!TVal )
 {
     return value.to!TVal;
 }
